@@ -1,0 +1,61 @@
+services:
+  wud:
+    image: docker.io/getwud/wud
+    labels:
+      wud.watch.digest: "true"
+    container_name: wud
+    restart: always
+    ports:
+      - 3000:3000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/store
+      - /root/.docker/config.json:/root/.docker/config.json:ro
+      - /home/user/containere:/home/user/containere
+
+      # Compose files mounted read-write so WUD can update them
+      - /home/user/containere/adsb/docker-compose.yml:/wud/adsb/docker-compose.yml
+      - /home/user/containere/microbin/docker-compose.yml:/wud/microbin/docker-compose.yml
+      - /home/user/containere/vaultwarden/docker-compose.yml:/wud/vaultwarden/docker-compose.yml
+      - /home/user/containere/markdown-live-preview/docker-compose.yml:/wud/markdown-live-preview/docker-compose.yml
+
+    environment:
+
+      # ── Watcher ──────────────────────────────────────────────────
+      - WUD_WATCHER_LOCAL_CRON=0 9 * * *
+      - WUD_WATCHER_LOCAL_WATCHALL=true
+
+      # ── Registry auth ─────────────────────────────────────────────
+      # GHCR
+      - WUD_REGISTRY_GHCR_MAIN_USERNAME=CHANGEME
+      - WUD_REGISTRY_GHCR_MAIN_TOKEN=CHANGEME
+
+      # Docker Hub
+      - WUD_REGISTRY_HUB_MAIN_LOGIN=CHANGEME
+      - WUD_REGISTRY_HUB_MAIN_PASSWORD=CHANGEME
+
+      # ── Discord trigger ───────────────────────────────────────────
+      - WUD_TRIGGER_DISCORD_MAIN_URL=CHANGEME
+      - WUD_TRIGGER_DISCORD_MAIN_BOTUSERNAME=WUD
+      - "WUD_TRIGGER_DISCORD_MAIN_SIMPLETITLE=New $${container.updateKind.kind} available for $${container.name}"
+      - "WUD_TRIGGER_DISCORD_MAIN_SIMPLEBODY=@everyone $${container.name} update: $${container.updateKind.localValue} -> $${container.updateKind.remoteValue}"
+
+      # ── Docker Compose triggers ───────────────────────────────────
+      # These enable the RUN button in the WUD UI.
+      # AUTO=false means manual only, PRUNE=true removes old images after update.
+
+      - WUD_TRIGGER_DOCKERCOMPOSE_ADSB_FILE=/wud/adsb/docker-compose.yml
+      - WUD_TRIGGER_DOCKERCOMPOSE_ADSB_AUTO=false
+      - WUD_TRIGGER_DOCKERCOMPOSE_ADSB_PRUNE=true
+
+      - WUD_TRIGGER_DOCKERCOMPOSE_MICROBIN_FILE=/wud/microbin/docker-compose.yml
+      - WUD_TRIGGER_DOCKERCOMPOSE_MICROBIN_AUTO=false
+      - WUD_TRIGGER_DOCKERCOMPOSE_MICROBIN_PRUNE=true
+
+      - WUD_TRIGGER_DOCKERCOMPOSE_VAULTWARDEN_FILE=/wud/vaultwarden/docker-compose.yml
+      - WUD_TRIGGER_DOCKERCOMPOSE_VAULTWARDEN_AUTO=false
+      - WUD_TRIGGER_DOCKERCOMPOSE_VAULTWARDEN_PRUNE=true
+
+      - WUD_TRIGGER_DOCKERCOMPOSE_MARKDOWNLIVEPREVIEW_FILE=/wud/markdown-live-preview/docker-compose.yml
+      - WUD_TRIGGER_DOCKERCOMPOSE_MARKDOWNLIVEPREVIEW_AUTO=false
+      - WUD_TRIGGER_DOCKERCOMPOSE_MARKDOWNLIVEPREVIEW_PRUNE=true

@@ -1,0 +1,227 @@
+services:
+
+  # ─────────────────────────────────────────────────────────────
+  # VAULTWARDEN
+  # ─────────────────────────────────────────────────────────────
+  vaultwarden:
+    image: vaultwarden/server:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: vaultwarden
+    restart: always
+
+    # ── Container hardening ──────────────────────────────────────
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 200
+
+    environment:
+      TZ: "Europe/Bucharest"
+
+      # ── Account security ──────────────────────────────────────
+      SIGNUPS_ALLOWED: "false"
+      INVITATIONS_ALLOWED: "false"
+      SIGNUPS_VERIFY: "true"
+      SHOW_PASSWORD_HINT: "false"
+
+      # ── Feature surface reduction ─────────────────────────────
+      EMERGENCY_ACCESS_ALLOWED: "false"
+      SENDS_ALLOWED: "false"
+      ORG_CREATION_USERS: "none"
+      DISABLE_ICON_DOWNLOAD: "false"
+      ICON_BLACKLIST_NON_GLOBAL_IPS: "true"
+
+      # ── Admin panel hardening ─────────────────────────────────
+      ADMIN_TOKEN: "${VW_ADMIN_TOKEN}"
+      ADMIN_RATELIMIT_SECONDS: "300"
+      ADMIN_RATELIMIT_MAX_BURST: "3"
+      ADMIN_SESSION_LIFETIME: "20"
+
+      # ── Login rate limiting ───────────────────────────────────
+      LOGIN_RATELIMIT_SECONDS: "300"
+      LOGIN_RATELIMIT_MAX_BURST: "5"
+
+      # ── Proxy / IP headers ────────────────────────────────────
+      IP_HEADER: "CF-Connecting-IP"
+      DOMAIN: "https://vault.example.com"
+
+      # ── SMTP ──────────────────────────────────────────────────
+      SMTP_HOST: "${VW_SMTP_HOST}"
+      SMTP_FROM: "${VW_SMTP_FROM}"
+      SMTP_PORT: 587
+      SMTP_SECURITY: "starttls"
+      SMTP_USERNAME: "${VW_SMTP_USERNAME}"
+      SMTP_PASSWORD: "${VW_SMTP_PASSWORD}"
+
+      # ── Logging ───────────────────────────────────────────────
+      LOG_FILE: "/data/vaultwarden.log"
+      EXTENDED_LOGGING: "true"
+      LOG_LEVEL: "warn"
+      LOG_TIMESTAMP_FORMAT: "%Y-%m-%d %H:%M:%S.%3f%z"
+
+    volumes:
+      - ./vw-data/:/data/
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "80"
+    networks:
+      - vault_internal_net
+
+  # ─────────────────────────────────────────────────────────────
+  # ANUBIS — PoW challenge layer
+  # ─────────────────────────────────────────────────────────────
+  init-anubis:
+    image: alpine:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: init-anubis-vault
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat > /config/policies.yaml <<'POLICY'
+        {
+          "bots": [
+            {"name": "allow-well-known",       "path_regex": "^/\\.well-known/.*$",       "action": "ALLOW"},
+            {"name": "allow-favicon",          "path_regex": "^/favicon\\.ico$",           "action": "ALLOW"},
+            {"name": "allow-CHANGEME", "user_agent_regex": "CHANGEME",    "action": "ALLOW"},
+            {"name": "allow-CHANGEME",          "user_agent_regex": "CHANGEME", "action": "ALLOW"},
+            {"name": "challenge-CHANGEME",      "user_agent_regex": "CHANGEME",              "action": "CHALLENGE"}
+          ]
+        }
+        POLICY
+        chmod 644 /config/policies.yaml
+    volumes:
+      - anubis-config-vault:/config
+    networks:
+      - vault_internal_net
+
+  anubis:
+    image: ghcr.io/techarohq/anubis:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: anubis-vault
+    restart: always
+    depends_on:
+      init-anubis:
+        condition: service_completed_successfully
+
+    # ── Container hardening ──────────────────────────────────────
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 100
+
+    volumes:
+      - anubis-config-vault:/config
+    command: ["-policy-fname", "/config/policies.yaml"]
+    environment:
+      BIND: ":3000"
+      TARGET: "http://vaultwarden:80"
+      DIFFICULTY: "5"
+      SECRET_KEY: "${ANUBIS_SECRET_KEY}"
+      REAL_IP_HEADER: "CF-Connecting-IP"
+      TRUSTED_PROXIES: "172.29.0.0/16"
+      ANUBIS_COOKIE_SECURE: "true"
+      ANUBIS_COOKIE_HTTP_ONLY: "true"
+      ANUBIS_COOKIE_SAME_SITE: "Lax"
+    ports:
+      - "127.0.0.1:8000:3000"
+    networks:
+      - vault_internal_net
+      - vault_edge_net
+
+  # ─────────────────────────────────────────────────────────────
+  # CLOUDFLARED — Cloudflare Tunnel
+  # ─────────────────────────────────────────────────────────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: cloudflared-vault
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+
+    # ── Container hardening ──────────────────────────────────────
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 100
+
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - anubis
+    networks:
+      - vault_edge_net
+
+  # ─────────────────────────────────────────────────────────────
+  # CROWDSEC — log analysis + community threat intel
+  # ─────────────────────────────────────────────────────────────
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: crowdsec-vault
+    restart: always
+
+    # ── Container hardening ──────────────────────────────────────
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 100
+
+    environment:
+      GID: "${GID:-1000}"
+      COLLECTIONS: "Dominic-Wagner/vaultwarden"
+      ENROLL_KEY: "${CROWDSEC_ENROLLMENT_KEY}"
+      ENROLL_INSTANCE_NAME: "vaultwarden-host"
+    volumes:
+      - crowdsec-db:/var/lib/crowdsec/data/
+      - crowdsec-config:/etc/crowdsec/
+      - ./vw-data/vaultwarden.log:/var/log/vaultwarden.log:ro
+      - ./crowdsec/acquis.yaml:/etc/crowdsec/acquis.yaml:ro
+    networks:
+      - vault_internal_net
+
+volumes:
+  anubis-config-vault:
+  crowdsec-db:
+  crowdsec-config:
+
+networks:
+  vault_internal_net:
+    name: vault_internal_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.27.0.0/16
+  vault_edge_net:
+    name: vault_edge_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16

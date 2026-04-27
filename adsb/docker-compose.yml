@@ -1,0 +1,234 @@
+networks:
+  adsb_internal_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+  adsb_tunnel_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.26.0.0/16
+
+services:
+  ultrafeeder:
+    image: ghcr.io/sdr-enthusiasts/docker-adsb-ultrafeeder:latest
+    container_name: ultrafeeder
+    hostname: ultrafeeder
+    labels:
+      wud.watch.digest: "true"
+    restart: unless-stopped
+    device_cgroup_rules:
+      - "c 189:* rwm"
+    # ── Fix B: host port mappings removed ────────────────────────
+    # ── Fix D: internal network only ─────────────────────────────
+    networks:
+      - adsb_internal_net
+    # ── Fix A: resource limits ───────────────────────────────────
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 300
+    environment:
+      - LOGLEVEL=${LOGLEVEL:-verbose}
+      - TZ=${FEEDER_TZ}
+      - READSB_DEVICE_TYPE=rtlsdr
+      - READSB_GAIN=auto
+      - READSB_RTLSDR_DEVICE=${ADSB_SDR_SERIAL}
+      - READSB_RTLSDR_PPM=${ADSB_SDR_PPM}
+      - READSB_LAT=${FEEDER_LAT}
+      - READSB_LON=${FEEDER_LONG}
+      - READSB_ALT=${FEEDER_ALT_M}m
+      - READSB_RX_LOCATION_ACCURACY=1
+      - READSB_STATS_RANGE=true
+      - ULTRAFEEDER_CONFIG=
+        adsb,feed.adsb.fi,30004,beast_reduce_plus_out;
+        adsb,in.adsb.lol,30004,beast_reduce_plus_out;
+        adsb,feed.airplanes.live,30004,beast_reduce_plus_out;
+        adsb,feed.planespotters.net,30004,beast_reduce_plus_out;
+        adsb,feed.theairtraffic.com,30004,beast_reduce_plus_out;
+        adsb,data.avdelphi.com,24999,beast_reduce_plus_out;
+        adsb,skyfeed.hpradar.com,30004,beast_reduce_plus_out;
+        adsb,dati.flyitalyadsb.com,4905,beast_reduce_plus_out;
+        adsb,feed1.adsbexchange.com,30004,beast_reduce_plus_out,uuid=${ADSBX_UUID};
+        mlat,feed.adsb.fi,31090,39000;
+        mlat,in.adsb.lol,31090,39001;
+        mlat,feed.airplanes.live,31090,39002;
+        mlat,mlat.planespotters.net,31090,39003;
+        mlat,feed.theairtraffic.com,31090,39004;
+        mlat,skyfeed.hpradar.com,31090,39005;
+        mlat,dati.flyitalyadsb.com,30100,39007;
+        mlat,feed.adsbexchange.com,31090,39008,uuid=${ADSBX_UUID}
+      - UUID=${MULTIFEEDER_UUID}
+      - MLAT_USER=${FEEDER_NAME}
+      - UPDATE_TAR1090=true
+      - TAR1090_MESSAGERATEINTITLE=true
+      - TAR1090_PAGETITLE=${FEEDER_NAME}
+      - TAR1090_PLANECOUNTINTITLE=true
+      - TAR1090_ENABLE_AC_DB=true
+      - TAR1090_FLIGHTAWARELINKS=true
+      - HEYWHATSTHAT_PANORAMA_ID=${FEEDER_HEYWHATSTHAT_ID}
+      - HEYWHATSTHAT_ALTS=${FEEDER_HEYWHATSTHAT_ALTS}
+      - TAR1090_SITESHOW=true
+      - TAR1090_RANGE_OUTLINE_COLORED_BY_ALTITUDE=true
+      - TAR1090_RANGE_OUTLINE_WIDTH=2.0
+      - TAR1090_RANGERINGSDISTANCES=50,100,150,200
+      - TAR1090_RANGERINGSCOLORS='#1A237E','#0D47A1','#42A5F5','#64B5F6'
+      - TAR1090_USEROUTEAPI=true
+      - GRAPHS1090_DARKMODE=true
+      - PROMETHEUS_ENABLE=true
+    volumes:
+      - /opt/adsb/ultrafeeder/globe_history:/var/globe_history
+      - /opt/adsb/ultrafeeder/graphs1090:/var/lib/collectd
+      - /proc/diskstats:/proc/diskstats:ro
+      - /dev/bus/usb:/dev/bus/usb
+    tmpfs:
+      - /run:exec,size=256M
+      - /tmp:size=128M
+      - /var/log:size=32M
+
+  fr24feed:
+    image: ghcr.io/sdr-enthusiasts/docker-flightradar24:latest
+    container_name: fr24feed
+    labels:
+      wud.watch.digest: "true"
+    restart: always
+    # ── Fix B + D ────────────────────────────────────────────────
+    networks:
+      - adsb_internal_net
+    mem_limit: 128m
+    cpus: "0.5"
+    pids_limit: 100
+    environment:
+      - BEASTHOST=ultrafeeder
+      - BEASTPORT=30005
+      - FR24KEY=${FR24KEY}
+      - MLAT=no
+    dns_search: .
+
+  pfclient:
+    image: ghcr.io/sdr-enthusiasts/docker-planefinder:latest
+    container_name: pfclient
+    labels:
+      wud.watch.digest: "true"
+    restart: always
+    # ── Fix B + D ────────────────────────────────────────────────
+    networks:
+      - adsb_internal_net
+    mem_limit: 96m
+    cpus: "0.5"
+    pids_limit: 100
+    environment:
+      - TZ=${FEEDER_TZ}
+      - BEASTHOST=ultrafeeder
+      - BEASTPORT=30005
+      - LAT=${FEEDER_LAT}
+      - LONG=${FEEDER_LONG}
+      - SHARECODE=${PLANEFINDER_SHARECODE}
+    tmpfs:
+      - /run:exec,size=64M
+      - /var/log/pfclient
+    depends_on:
+      - ultrafeeder
+
+  # ─────────────────────────────────────────────────────────────
+  # ANUBIS — PoW challenge layer
+  # ─────────────────────────────────────────────────────────────
+  init-anubis-adsb:
+    image: alpine:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: init-anubis-adsb
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat > /config/policies.yaml <<'POLICY'
+        {
+          "store": {
+            "backend": "bbolt",
+            "parameters": {
+              "path": "/data/anubis.db"
+            }
+          },
+          "rules": [
+            {"path_regex": "^/data/.", "policy": "ALLOW"},
+            {"path_regex": "^/graphs1090/.", "policy": "ALLOW"}
+          ],
+          "bots": [
+            {"name": "challenge-all", "user_agent_regex": ".", "action": "CHALLENGE"}
+          ]
+        }
+        POLICY
+        chmod 644 /config/policies.yaml
+        chown -R 1000:1000 /data
+        chmod 750 /data
+    volumes:
+      - anubis-config-adsb:/config
+      - anubis-data-adsb:/data
+    # ── Fix D: join internal only (init touches config/data; Anubis itself joins both) ──
+    networks:
+      - adsb_internal_net
+
+  anubis-adsb:
+    image: ghcr.io/techarohq/anubis:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: anubis-adsb
+    restart: always
+    depends_on:
+      init-anubis-adsb:
+        condition: service_completed_successfully
+      ultrafeeder:
+        condition: service_started
+    volumes:
+      - anubis-config-adsb:/config:ro
+      - anubis-data-adsb:/data
+    environment:
+      BIND: ":8923"
+      TARGET: "http://ultrafeeder:80"
+      DIFFICULTY: "4"
+      ED25519_PRIVATE_KEY_HEX: "${ANUBIS_ADSB_SECRET_KEY}"
+      CUSTOM_REAL_IP_HEADER: "CF-Connecting-IP"
+      COOKIE_SECURE: "true"
+      COOKIE_SAME_SITE: "Lax"
+      COOKIE_DOMAIN: "adsb.example.com"
+      COOKIE_EXPIRATION_TIME: "12h"
+      POLICY_FNAME: "/config/policies.yaml"
+      REDIRECT_DOMAINS: "adsb.example.com"
+    # ── Fix A ────────────────────────────────────────────────────
+    mem_limit: 64m
+    cpus: "0.5"
+    pids_limit: 200
+    ports:
+      - "127.0.0.1:4058:8923"
+    # ── Fix D: needs to reach ultrafeeder on internal, and be reached
+    #           by cloudflared on tunnel ──────────────────────────
+    networks:
+      - adsb_internal_net
+      - adsb_tunnel_net
+
+  # ─────────────────────────────────────────────────────────────
+  # CLOUDFLARED — Cloudflare Tunnel
+  # ─────────────────────────────────────────────────────────────
+  cloudflared-adsb:
+    image: cloudflare/cloudflared:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: cloudflared-adsb
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN_ADSB}
+    depends_on:
+      - anubis-adsb
+    # ── Fix A ────────────────────────────────────────────────────
+    mem_limit: 96m
+    cpus: "0.5"
+    pids_limit: 100
+    # ── Fix D: tunnel network only, cannot see the ADS-B trio ────
+    networks:
+      - adsb_tunnel_net
+
+volumes:
+  anubis-config-adsb:
+  anubis-data-adsb:

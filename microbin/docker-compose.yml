@@ -1,0 +1,255 @@
+services:
+
+  # ─────────────────────────────────────────────────────────────
+  # MICROBIN
+  # ─────────────────────────────────────────────────────────────
+  microbin:
+    image: docker.io/danielszabo99/microbin:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: microbin
+    restart: always
+
+    # ── Container hardening ──────────────────────────────────────
+    user: "1000:1000"              # adjust if `id` showed different
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    mem_limit: 256m
+    cpus: "0.5"
+    pids_limit: 100
+
+    environment:
+      TZ: "Europe/Bucharest"
+      RUST_LOG: "info"
+      MICROBIN_PUBLIC_PATH: "${MICROBIN_PUBLIC_PATH}"
+      MICROBIN_DATA_DIR: "/app/microbin_data"
+      MICROBIN_DISABLE_TELEMETRY: "true"
+      MICROBIN_ETERNAL_PASTA: "true"
+      MICROBIN_ENABLE_BURN_AFTER: "true"
+      MICROBIN_QR: "true"
+      MICROBIN_PRIVATE: "true"
+      MICROBIN_HIGHLIGHTSYNTAX: "true"
+      MICROBIN_MAX_EXPIRY: "never"
+      MICROBIN_DEFAULT_EXPIRY: "never"
+      MICROBIN_GC_DAYS: "0"
+      MICROBIN_HIDE_LOGO: "true"
+      MICROBIN_NO_LISTING: "true"
+      MICROBIN_NO_FILE_UPLOAD: "true"
+      MICROBIN_DISABLE_UPDATE_CHECKING: "true"
+      MICROBIN_ENCRYPTION_SERVER_SIDE: "true"
+      MICROBIN_EDITABLE: "false"
+      # MICROBIN_ADMIN_USERNAME: "${MICROBIN_ADMIN_USERNAME}"
+      # MICROBIN_ADMIN_PASSWORD: "${MICROBIN_ADMIN_PASSWORD}"
+      MICROBIN_FOOTER_TEXT: "${MICROBIN_FOOTER_TEXT}"
+      MICROBIN_MAX_FILE_SIZE_UNENCRYPTED_MB: "10"
+      MICROBIN_MAX_FILE_SIZE_ENCRYPTED_MB: "10"
+    volumes:
+      - ./microbin-data:/app/microbin_data
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "8080"
+    networks:
+      - microbin_internal_net
+
+  # ─────────────────────────────────────────────────────────────
+  # DOCKER SOCKET PROXY — safe read-only Docker API for CrowdSec
+  # ─────────────────────────────────────────────────────────────
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: docker-socket-proxy-microbin
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"
+      LOGS: "1"
+      INFO: "1"
+      PING: "1"
+      VERSION: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /run:noexec,nosuid,size=8m
+      - /tmp:noexec,nosuid,size=8m
+    mem_limit: 32m
+    cpus: "0.25"
+    pids_limit: 50
+    networks:
+      - crowdsec_internal_net
+
+  # ─────────────────────────────────────────────────────────────
+  # ANUBIS — PoW challenge layer
+  # ─────────────────────────────────────────────────────────────
+  init-anubis:
+    image: alpine:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: init-anubis-microbin
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat > /config/policies.yaml <<'POLICY'
+        {
+          "bots": [
+            {"name": "allow-api",     "path_regex": "^/api/.*$",       "action": "ALLOW"},
+            {"name": "allow-admin",   "path_regex": "^/admin/.*$",     "action": "ALLOW"},
+            {"name": "allow-static",  "path_regex": "^/static/.*$",    "action": "ALLOW"},
+            {"name": "allow-paste",   "path_regex": "^/p/.*$",         "action": "ALLOW"},
+            {"name": "allow-robots",  "path_regex": "^/robots\\.txt$", "action": "ALLOW"},
+            {"name": "allow-favicon", "path_regex": "^/favicon\\.ico$", "action": "ALLOW"},
+            {"name": "challenge-mozilla", "user_agent_regex": "Mozilla", "action": "CHALLENGE"}
+          ]
+        }
+        POLICY
+        chmod 644 /config/policies.yaml
+    volumes:
+      - anubis-config-microbin:/config
+    mem_limit: 32m
+    pids_limit: 20
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - microbin_internal_net
+
+  anubis:
+    image: ghcr.io/techarohq/anubis:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: anubis-microbin
+    restart: always
+    depends_on:
+      init-anubis:
+        condition: service_completed_successfully
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    mem_limit: 128m
+    cpus: "0.5"
+    pids_limit: 100
+
+    volumes:
+      - anubis-config-microbin:/config:ro
+      - anubis-data:/data
+    environment:
+      BIND: ":8923"
+      TARGET: "http://microbin:8080"
+      DIFFICULTY: "4"
+      SECRET_KEY: "${ANUBIS_SECRET_KEY}"
+      REAL_IP_HEADER: "CF-Connecting-IP"
+      TRUSTED_PROXIES: "172.31.0.0/16"
+      COOKIE_SECURE: "true"
+      COOKIE_HTTP_ONLY: "true"
+      COOKIE_SAME_SITE: "Lax"
+      COOKIE_DOMAIN: "bin.example.com"
+      COOKIE_EXPIRY: "12h"
+      POLICY_FNAME: "/config/policies.yaml"
+      STORAGE_TYPE: "bbolt"
+      STORAGE_BBOLT_PATH: "/data/anubis.db"
+      REDIRECT_DOMAINS: "bin.example.com"
+    ports:
+      - "127.0.0.1:8082:8923"
+    networks:
+      - microbin_internal_net
+      - microbin_edge_net
+
+  # ─────────────────────────────────────────────────────────────
+  # CLOUDFLARED — Cloudflare Tunnel
+  # ─────────────────────────────────────────────────────────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: cloudflared-microbin
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    mem_limit: 128m
+    cpus: "0.5"
+    pids_limit: 100
+
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - anubis
+    networks:
+      - microbin_edge_net
+
+  # ─────────────────────────────────────────────────────────────
+  # CROWDSEC — log analysis + community threat intel
+  # ─────────────────────────────────────────────────────────────
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    labels:
+      wud.watch.digest: "true"
+    container_name: crowdsec-microbin
+    restart: always
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 384m
+    cpus: "0.5"
+    pids_limit: 200
+
+    environment:
+      GID: "${GID:-1000}"
+      COLLECTIONS: "crowdsecurity/linux crowdsecurity/appsec-virtual-patching crowdsecurity/appsec-generic-rules"
+      ENROLL_KEY: "${CROWDSEC_ENROLLMENT_KEY}"
+      ENROLL_INSTANCE_NAME: "microbin-host"
+      DOCKER_HOST: "tcp://docker-socket-proxy:2375"
+    volumes:
+      - crowdsec-db:/var/lib/crowdsec/data/
+      - crowdsec-config:/etc/crowdsec/
+      - ./crowdsec/acquis.yaml:/etc/crowdsec/acquis.yaml:ro
+    networks:
+      - crowdsec_internal_net
+
+volumes:
+  anubis-config-microbin:
+  anubis-data:
+  crowdsec-db:
+  crowdsec-config:
+
+networks:
+  microbin_internal_net:
+    name: microbin_internal_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
+  microbin_edge_net:
+    name: microbin_edge_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/16
+  crowdsec_internal_net:
+    name: crowdsec_internal_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.32.0.0/16

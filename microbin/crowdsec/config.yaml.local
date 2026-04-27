@@ -1,0 +1,9 @@
+common:
+  log_media: stdout
+  log_level: info
+
+api:
+  server:
+    enable: true
+    listen_uri: 0.0.0.0:8080
+    # online_client section removed - CAPI disabled for local-only mode

@@ -1,0 +1,11 @@
+[Unit]
+Description=Report Microbin paste stats to Discord
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=CHANGEME
+Environment=MICROBIN_DATA_DIR=/home/user/containere/microbin/microbin-data
+Environment=DISCORD_WEBHOOK_URL=CHANGEME
+ExecStart=/home/user/containere/microbin/microbin-stats.sh

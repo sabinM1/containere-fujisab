@@ -1,0 +1,9 @@
+bots:
+  - name: allow-post
+    action: ALLOW
+    expression:
+      all:
+        - 'method == "POST"'
+  - name: challenge-all
+    user_agent_regex: ".*"
+    action: CHALLENGE
